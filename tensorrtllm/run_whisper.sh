@@ -27,8 +27,8 @@ build_model() {
         --output_dir "$checkpoint_dir" \
         --model_name "$model_id" 
     local INFERENCE_PRECISION=float16
-    local MAX_BEAM_WIDTH=4
-    local MAX_BATCH_SIZE=256
+    local MAX_BEAM_WIDTH=1
+    local MAX_BATCH_SIZE=64
 
     echo "Building encoder for model: $model_id"
     trtllm-build --checkpoint_dir "${checkpoint_dir}/encoder" \
@@ -55,96 +55,159 @@ build_model() {
                   --gpt_attention_plugin "$INFERENCE_PRECISION"
 }
 
+build_model_decoder_int8() {
+    local model_id=$1
+    local checkpoint_dir="${model_id}_tllm_checkpoint"
+    local output_dir="whisper_${model_id}_decoder_int8"
+    echo "Converting checkpoint for model: $model_id"
+    python3 convert_checkpoint.py \
+        --output_dir "$checkpoint_dir" \
+        --model_name "$model_id" 
+    local INFERENCE_PRECISION=float16
+    local MAX_BEAM_WIDTH=1
+    local MAX_BATCH_SIZE=64
+
+    echo "Building encoder for model: $model_id"
+    trtllm-build --checkpoint_dir "${checkpoint_dir}/encoder" \
+                  --output_dir "${output_dir}/encoder" \
+                  --moe_plugin disable \
+                  --enable_xqa disable \
+                  --max_batch_size "$MAX_BATCH_SIZE" \
+                  --gemm_plugin disable \
+                  --bert_attention_plugin "$INFERENCE_PRECISION" \
+                  --max_input_len 3000 --max_seq_len 3000
+
+    python3 convert_checkpoint.py \
+                    --use_weight_only \
+                    --weight_only_precision int8 \
+                    --output_dir ${checkpoint_dir}_int8
+
+    echo "Building decoder for model: $model_id"
+    trtllm-build --checkpoint_dir "${checkpoint_dir}_int8/decoder" \
+                  --output_dir "${output_dir}/decoder" \
+                  --moe_plugin disable \
+                  --enable_xqa disable \
+                  --max_beam_width "$MAX_BEAM_WIDTH" \
+                  --max_batch_size "$MAX_BATCH_SIZE" \
+                  --max_seq_len 114 \
+                  --max_input_len 14 \
+                  --max_encoder_input_len 3000 \
+                  --gemm_plugin "$INFERENCE_PRECISION" \
+                  --bert_attention_plugin "$INFERENCE_PRECISION" \
+                  --gpt_attention_plugin "$INFERENCE_PRECISION"
+}
+
 MODEL_IDs=("large-v3-turbo" "large-v3")
+MODEL_IDs=("large-v3")
+# MODEL_IDs=("large-v3-turbo")
 DEVICE_INDEX=0
 BATCH_SIZE=64
-
+# BATCH_SIZE=256
+MODEL_IDs=("large-v3")
 num_models=${#MODEL_IDs[@]}
 
-pip install -r ../requirements/requirements_trtllm.txt
+# pip install -r ../requirements/requirements_trtllm.txt
 
 for (( i=0; i<${num_models}; i++ ));
 do
     MODEL_ID=${MODEL_IDs[$i]}
-    download_model $MODEL_ID
-    build_model $MODEL_ID
+    # download_model $MODEL_ID
+    # build_model $MODEL_ID
+    # build_model_decoder_int8 $MODEL_ID
 
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="yuekai/aishell" \
+    #     --dataset="test" \
+    #     --split="test" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
     python3 run_eval.py \
-        --model_id=whisper_${MODEL_ID} \
-        --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
-        --dataset="ami" \
+        --model_id=whisper_${MODEL_ID}_decoder_int8 \
+        --dataset_path="yuekai/speechio" \
+        --dataset="SPEECHIO_ASR_ZH00019" \
         --split="test" \
         --device=${DEVICE_INDEX} \
         --batch_size=${BATCH_SIZE} \
         --max_eval_samples=-1
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
+    #     --dataset="ami" \
+    #     --split="test" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
 
-    python3 run_eval.py \
-        --model_id=whisper_${MODEL_ID} \
-        --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
-        --dataset="earnings22" \
-        --split="test" \
-        --device=${DEVICE_INDEX} \
-        --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
+    #     --dataset="earnings22" \
+    #     --split="test" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
 
-    python3 run_eval.py \
-        --model_id=whisper_${MODEL_ID} \
-        --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
-        --dataset="gigaspeech" \
-        --split="test" \
-        --device=${DEVICE_INDEX} \
-        --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
+    #     --dataset="gigaspeech" \
+    #     --split="test" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
 
-    python3 run_eval.py \
-        --model_id=whisper_${MODEL_ID} \
-        --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
-        --dataset="librispeech" \
-        --split="test.clean" \
-        --device=${DEVICE_INDEX} \
-        --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
+    #     --dataset="librispeech" \
+    #     --split="test.clean" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
 
-    python3 run_eval.py \
-        --model_id=whisper_${MODEL_ID} \
-        --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
-        --dataset="librispeech" \
-        --split="test.other" \
-        --device=${DEVICE_INDEX} \
-        --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
+    #     --dataset="librispeech" \
+    #     --split="test.other" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
 
-    python3 run_eval.py \
-        --model_id=whisper_${MODEL_ID} \
-        --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
-        --dataset="spgispeech" \
-        --split="test" \
-        --device=${DEVICE_INDEX} \
-        --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
+    #     --dataset="spgispeech" \
+    #     --split="test" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
 
-    python3 run_eval.py \
-        --model_id=whisper_${MODEL_ID} \
-        --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
-        --dataset="tedlium" \
-        --split="test" \
-        --device=${DEVICE_INDEX} \
-        --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
+    #     --dataset="tedlium" \
+    #     --split="test" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
 
-    python3 run_eval.py \
-        --model_id=whisper_${MODEL_ID} \
-        --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
-        --dataset="voxpopuli" \
-        --split="test" \
-        --device=${DEVICE_INDEX} \
-        --batch_size=${BATCH_SIZE} \
-        --max_eval_samples=-1
+    # python3 run_eval.py \
+    #     --model_id=whisper_${MODEL_ID} \
+    #     --dataset_path="hf-audio/esb-datasets-test-only-sorted" \
+    #     --dataset="voxpopuli" \
+    #     --split="test" \
+    #     --device=${DEVICE_INDEX} \
+    #     --batch_size=${BATCH_SIZE} \
+    #     --max_eval_samples=-1
 
     # Evaluate results
     RUNDIR=`pwd` && \
     cd ../normalizer && \
-    python3 -c "import eval_utils; eval_utils.score_results('${RUNDIR}/results', '${MODEL_ID}')" > log.txt && \
+    python3 -c "import eval_utils; eval_utils.score_results('${RUNDIR}/results', '${MODEL_ID}')" > $RUNDIR/log_${MODEL_ID}.txt && \
     cd $RUNDIR
+    echo "Done evaluating $MODEL_ID"
 
 done

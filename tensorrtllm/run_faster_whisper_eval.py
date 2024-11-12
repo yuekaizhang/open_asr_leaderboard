@@ -1,11 +1,10 @@
 import argparse
 import os
 import torch
-from tensorrt_llm.runtime import ModelRunnerCpp
-from tensorrt_llm.bindings import GptJsonConfig
+from faster_whisper import WhisperModel, BatchedInferencePipeline
 import numpy as np
 
-from vad.pyannote import Pyannote
+# from vad.pyannote import Pyannote
 from whisper_utils import log_mel_spectrogram, get_tokenizer
 import evaluate
 from normalizer import data_utils
@@ -21,10 +20,11 @@ try:
 except ImportError:
     print("Please pip install WeTextProcessing")
     raise
-class WhisperTRTLLM(object):
+
+class FasterWhisper(object):
 
     def __init__(self,
-                 engine_dir,
+                 model_id,
                  assets_dir="assets",
                  batch_size=64,
                  text_prefix="<|startoftranscript|><|zh|><|transcribe|><|notimestamps|>",
@@ -39,85 +39,54 @@ class WhisperTRTLLM(object):
         self.eot_id = self.tokenizer.encode(
             "<|endoftext|>",
             allowed_special=self.tokenizer.special_tokens_set)[0]
-        json_config = GptJsonConfig.parse_file(Path(engine_dir) / 'decoder' / 'config.json')
-        assert json_config.model_config.supports_inflight_batching
-        runner_kwargs = dict(engine_dir=engine_dir,
-                                is_enc_dec=True,
-                                max_batch_size=batch_size,
-                                max_input_len=3000,
-                                max_output_len=96,
-                                max_beam_width=1,
-                                debug_mode=False,
-                                kv_cache_free_gpu_memory_fraction=0.9)
-        self.model_runner_cpp = ModelRunnerCpp.from_dir(**runner_kwargs)
         self.n_mels = n_mels
         self.text_prefix = text_prefix
-
-    def process_single_batch(self, mel_batch, decoder_input_ids, mel_input_lengths, max_new_tokens):
-        outputs = self.model_runner_cpp.generate(
-            batch_input_ids=decoder_input_ids,
-            encoder_input_features=mel_batch,
-            encoder_output_lengths=mel_input_lengths // 2,
-            max_new_tokens=max_new_tokens,
-            end_id=self.eot_id,
-            pad_id=self.eot_id,
-            num_beams=1,
-            output_sequence_lengths=True,
-            return_dict=True
-        )
-        
-        output_ids = outputs['output_ids'].cpu().numpy().tolist()
-        texts = []
-        for i in range(len(output_ids)):
-            text = self.tokenizer.decode(output_ids[i][0]).strip()
-            text = re.sub(r'<\|.*?\|>', '', text)
-            texts.append(text)
-        return texts
-    
+        model = WhisperModel(model_id, device="cuda", compute_type="float16")
+        self.model = BatchedInferencePipeline(model=model)
+  
     def process_batch(self, mel, mel_input_lengths, num_threads=1, max_new_tokens=96):
         prompt_id = self.tokenizer.encode(
             self.text_prefix, allowed_special=self.tokenizer.special_tokens_set)
-        prompt_id = torch.tensor(prompt_id)
+        prompt_id = torch.tensor(prompt_id).tolist()
         batch_size = len(mel)
-        decoder_input_ids = prompt_id.repeat(batch_size, 1)
 
-        with torch.no_grad():
-            if isinstance(mel, list):
-                mel = torch.stack([m.transpose(1, 2).type(torch.float16).squeeze(0) for m in mel])
-            else:
-                mel = mel.transpose(1, 2)
-
-            num_threads = min(num_threads, batch_size)
-            mel_batches = torch.split(mel, batch_size // num_threads)
-            mel_input_lengths_batches = torch.split(mel_input_lengths, batch_size // num_threads)
-
-            texts_list = []
-            with ThreadPoolExecutor(max_workers=num_threads) as executor:
-                futures = []
-                for i, mel_batch in enumerate(mel_batches):
-                    current_length = mel_batch.size(0)
-                    futures.append(executor.submit(
-                        self.process_single_batch,
-                        mel_batch,
-                        decoder_input_ids[:current_length],
-                        mel_input_lengths_batches[i],
-                        max_new_tokens
-                    ))
-                
-                for future in futures:
-                    texts_list.extend(future.result())
-        
-        return texts_list
+        # if isinstance(mel, list):
+        #     mel = torch.stack([m.transpose(1, 2).type(torch.float16).squeeze(0) for m in mel])
+        # else:
+        #     mel = mel.transpose(1, 2)
+        if isinstance(mel, list):
+            mel = torch.stack([m.type(torch.float16).squeeze(0) for m in mel])
+        else:
+            mel = mel
+        encoder_output = self.model.model.encode(mel)
+        results = self.model.model.model.generate(
+            encoder_output,
+            [prompt_id] * batch_size,
+            beam_size=1,
+            patience=1,
+            length_penalty=1,
+            max_length=448,
+            return_scores=True,
+            return_no_speech_prob=True,
+        )
+        texts = []
+        for i, result in enumerate(results):
+            output_ids = result.sequences_ids[0]
+            text = self.tokenizer.decode(output_ids).strip()
+            text = re.sub(r'<\|.*?\|>', '', text)
+            texts.append(text)
+        return texts
 
 def main(args):
-    asr_model = WhisperTRTLLM(engine_dir=args.model_id)
+    asr_model = FasterWhisper(model_id=args.model_id)
+
     default_vad_options = {
         "chunk_size": 30,
         "vad_onset": 0.500,
         "vad_offset": 0.363
     }
     # vad model copied from https://github.com/m-bain/whisperX/pull/888
-    vad_model = Pyannote(torch.device('cuda'), use_auth_token="", **default_vad_options)
+    # vad_model = Pyannote(torch.device('cuda'), use_auth_token="", **default_vad_options)
     def benchmark(batch, min_new_tokens=None):
         # Load audio inputs
         max_duration, sample_rate, max_batch_size = 30, 16000, 64
@@ -167,7 +136,7 @@ def main(args):
                                               dtype=torch.int32,
                                               device='cuda')
 
-        texts_origin = asr_model.process_batch(features, features_input_lengths, num_threads=4)
+        texts_origin = asr_model.process_batch(features, features_input_lengths)
 
         # merge the transcriptions of the same audio
         texts = []
